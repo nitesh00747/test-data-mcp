@@ -6,9 +6,11 @@
  *
  * Three rules it enforces:
  *   1. Unique: every user gets a name nobody else has, so parallel tests never share data.
- *   2. Tagged: everything it creates carries tags (test-data, run:<id>, owner:<who>), so it can
- *      find and delete its own data later, even after a crash, and never touch anything else.
- *   3. Safe target: it refuses to run against hosts that aren't explicitly allowed (no prod).
+ *   2. Tagged: everything it creates carries tags (test-data, run:<id>, owner:<who>, and optionally
+ *      group:<id> for a whole test run), so it can find and delete its own data later, even after a
+ *      crash, and never touch anything else.
+ *   3. Safe target: it refuses to run against hosts that aren't explicitly allowed (no prod), and
+ *      never follows redirects, so the admin key can't be sent anywhere else.
  */
 import { randomBytes } from 'node:crypto';
 
@@ -50,13 +52,33 @@ export type TestDataOptions = {
   adminKey?: string;
   /** Who is creating data, e.g. "playwright-worker-2" or "mcp". Shown in tags and names. */
   owner: string;
-  /** Groups everything created in one run, for cleanup. Generated if not given. */
+  /** Groups everything this client creates, for cleanup. Generated if not given. */
   runId?: string;
+  /** Optional larger group, e.g. one Playwright run across all its workers. Adds a group:<id> tag. */
+  groupId?: string;
   /** Hosts this client may talk to. Default: localhost only, plus TEST_DATA_ALLOWED_HOSTS. */
   allowedHosts?: string[];
 };
 
-export class TestDataError extends Error {}
+export class TestDataError extends Error {
+  /** HTTP status from the app, when the error came from a response */
+  constructor(
+    message: string,
+    readonly status?: number,
+  ) {
+    super(message);
+  }
+}
+
+/** Which test data a cleanup removes. There is deliberately no "everything" option. */
+export type CleanupScope =
+  | 'run' // created by this client
+  | 'group' // created by any client in this client's group (e.g. this Playwright run)
+  | 'owner' // created by this owner in any run (e.g. every MCP session)
+  | { olderThanMinutes: number }; // any test data nobody has used for this long: abandoned leftovers
+
+/** A random id. Never derived from the clock: clock-based ids repeat and then collide. */
+export const newRunId = (prefix = '') => `${prefix}${randomBytes(4).toString('hex')}`;
 
 const VALID_EXPIRY = '12/39';
 const EXPIRED_EXPIRY = '01/20';
@@ -90,6 +112,7 @@ export class TestDataClient {
   readonly baseUrl: string;
   readonly runId: string;
   readonly owner: string;
+  readonly groupId?: string;
   readonly tags: string[];
   private readonly adminKey: string;
   private counter = 0;
@@ -101,8 +124,9 @@ export class TestDataClient {
     ).origin;
     this.adminKey = opts.adminKey ?? process.env.ADMIN_KEY ?? 'local-admin-key';
     this.owner = opts.owner.replace(/[^\w-]/g, '-');
-    this.runId = opts.runId ?? randomBytes(3).toString('hex');
-    this.tags = [TEST_DATA_TAG, `run:${this.runId}`, `owner:${this.owner}`];
+    this.runId = opts.runId ?? newRunId();
+    this.groupId = opts.groupId;
+    this.tags = [TEST_DATA_TAG, `run:${this.runId}`, `owner:${this.owner}`, ...(opts.groupId ? [`group:${opts.groupId}`] : [])];
   }
 
   // ---------- HTTP ----------
@@ -112,15 +136,24 @@ export class TestDataClient {
     try {
       res = await fetch(this.baseUrl + path, {
         method,
+        // Never follow a redirect: it could lead off the allow-listed host, taking the admin key with it.
+        redirect: 'error',
         headers: { 'x-admin-key': this.adminKey, ...(body ? { 'content-type': 'application/json' } : {}) },
         body: body ? JSON.stringify(body) : undefined,
       });
     } catch (e) {
-      throw new TestDataError(`Can't reach the app at ${this.baseUrl} (${(e as Error).message}). Is it running? Try: npm run app`);
+      const cause = (e as Error & { cause?: Error }).cause?.message ?? (e as Error).message;
+      if (/redirect/i.test(cause)) throw new TestDataError(`${this.baseUrl} answered with a redirect; refusing to follow it (it could leave the allowed hosts).`);
+      throw new TestDataError(`Can't reach the app at ${this.baseUrl} (${cause}). Is it running? Try: npm run app`);
     }
     const text = await res.text();
-    const data = text ? JSON.parse(text) : undefined;
-    if (!res.ok) throw new TestDataError(`${method} ${path} failed (${res.status}): ${data?.error ?? text}`);
+    let data: { error?: string } | undefined;
+    try {
+      data = text ? JSON.parse(text) : undefined;
+    } catch {
+      throw new TestDataError(`${method} ${path}: expected JSON, got: ${text.slice(0, 120)}`, res.status);
+    }
+    if (!res.ok) throw new TestDataError(`${method} ${path} failed (${res.status}): ${data?.error ?? text}`, res.status);
     return data as T;
   }
 
@@ -186,10 +219,19 @@ export class TestDataClient {
     return this.call('GET', `/api/test-data/users/${userId}`);
   }
 
-  /** Users this run created ("run"), or every test-data user from any run ("all"). */
-  async listUsers(scope: 'run' | 'all' = 'run'): Promise<{ id: string; username: string; tags: string[]; orders: number }[]> {
-    const tag = scope === 'run' ? `run:${this.runId}` : TEST_DATA_TAG;
+  /** Read-only: test users of this run ("run"), this group, this owner, or every run ("all"). */
+  async listUsers(scope: 'run' | 'group' | 'owner' | 'all' = 'run'): Promise<ListedUser[]> {
+    const tag =
+      scope === 'run' ? `run:${this.runId}`
+      : scope === 'group' ? `group:${this.requireGroup()}`
+      : scope === 'owner' ? `owner:${this.owner}`
+      : TEST_DATA_TAG;
     return this.call('GET', `/api/test-data/users?tag=${encodeURIComponent(tag)}`);
+  }
+
+  private requireGroup(): string {
+    if (!this.groupId) throw new TestDataError('This client has no groupId, so there is no group to clean up.');
+    return this.groupId;
   }
 
   /** Delete one user, but only if it is test data. */
@@ -199,10 +241,57 @@ export class TestDataClient {
     await this.call('DELETE', `/api/test-data/users/${userId}`);
   }
 
-  /** Delete this run's data ("run"), or all test data from every run ("all"). Returns how many users went. */
-  async cleanup(scope: 'run' | 'all' = 'run'): Promise<number> {
-    const users = await this.listUsers(scope);
-    for (const u of users) await this.call('DELETE', `/api/test-data/users/${u.id}`);
-    return users.length;
+  /**
+   * Delete test data and return how many users went. Scopes: this client's run (default), its group,
+   * its owner, or any test data unused for N minutes (abandoned leftovers, never data in use).
+   */
+  async cleanup(scope: CleanupScope = 'run'): Promise<number> {
+    let users: ListedUser[];
+    if (typeof scope === 'object') {
+      if (!(scope.olderThanMinutes >= 15)) throw new TestDataError('olderThanMinutes must be at least 15, so data in use is never removed');
+      const cutoff = Date.now() - scope.olderThanMinutes * 60_000;
+      // "Abandoned" means not *used* for a while (no login, cart or order change), not just created long ago.
+      users = (await this.listUsers('all')).filter((u) => Date.parse(u.lastUsedAt ?? u.createdAt) < cutoff);
+    } else {
+      users = await this.listUsers(scope);
+    }
+    let deleted = 0;
+    for (const u of users) {
+      try {
+        await this.call('DELETE', `/api/test-data/users/${u.id}`);
+        deleted++;
+      } catch (e) {
+        if ((e as TestDataError).status !== 404) throw e; // someone else already removed it
+      }
+    }
+    return deleted;
+  }
+}
+
+export type ListedUser = { id: string; username: string; tags: string[]; orders: number; createdAt: string; lastUsedAt?: string };
+
+/**
+ * Remembers what a test created and deletes it afterwards. A user that is already gone is fine;
+ * any other failure is returned, so the caller can report it instead of silently leaking data.
+ */
+export class UserTracker {
+  private ids: string[] = [];
+  constructor(private readonly client: TestDataClient) {}
+
+  track<T extends { id: string }>(user: T): T {
+    this.ids.push(user.id);
+    return user;
+  }
+
+  async dispose(): Promise<string[]> {
+    const problems: string[] = [];
+    for (const id of this.ids.splice(0)) {
+      try {
+        await this.client.deleteUser(id);
+      } catch (e) {
+        if ((e as TestDataError).status !== 404) problems.push(`${id}: ${(e as Error).message}`);
+      }
+    }
+    return problems;
   }
 }

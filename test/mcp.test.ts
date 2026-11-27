@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { startApp } from '../demo-app/server.ts';
+import { TestDataClient } from '../src/core/test-data.ts';
 
 let app: Awaited<ReturnType<typeof startApp>>;
 let client: Client;
@@ -83,6 +84,54 @@ test('list and cleanup only touch this session\'s data', async () => {
   assert.equal(text(await call('list_test_data')), 'No test data found.');
   const demo = await fetch(`${app.url}/api/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: 'demo', password: 'demo123' }) });
   assert.equal(demo.status, 200, 'seed user still there');
+});
+
+test('#1 two agent sessions never collide', async () => {
+  const second = new Client({ name: 'mcp-test-2', version: '1.0.0' });
+  await second.connect(serverTransport({ TEST_DATA_BASE_URL: app.url }));
+  try {
+    const a = await call('create_test_user', { label: 'twin' });
+    const b = (await second.callTool({ name: 'create_test_user', arguments: { label: 'twin' } })) as ToolResult;
+    assert.ok(!a.isError && !b.isError, text(b));
+    assert.notEqual(a.structuredContent?.username, b.structuredContent?.username);
+    // Each session's default cleanup removes only its own user
+    assert.match(text(await call('cleanup_test_data')), /Deleted 1 /);
+    assert.match(text((await second.callTool({ name: 'cleanup_test_data', arguments: {} })) as ToolResult), /Deleted 1 /);
+  } finally {
+    await second.close();
+  }
+});
+
+test('#4 an agent can\'t wipe another run\'s data in use', async () => {
+  const playwrightRun = new TestDataClient({ baseUrl: app.url, owner: 'playwright-w0', groupId: 'pw-inflight' });
+  const inUse = await playwrightRun.createUser();
+
+  // "all" is no longer an option
+  const all = (await client.callTool({ name: 'cleanup_test_data', arguments: { scope: 'all' } }).catch((e: Error) => ({ isError: true, content: [{ type: 'text', text: e.message }] }))) as ToolResult;
+  assert.equal(all.isError, true);
+  // "abandoned" needs at least 60 minutes
+  const tooSoon = (await client.callTool({ name: 'cleanup_test_data', arguments: { scope: 'abandoned', older_than_minutes: 5 } }).catch((e: Error) => ({ isError: true, content: [{ type: 'text', text: e.message }] }))) as ToolResult;
+  assert.equal(tooSoon.isError, true);
+
+  for (const scope of ['session', 'my_sessions', 'abandoned']) {
+    assert.ok(!(await call('cleanup_test_data', { scope })).isError);
+  }
+  assert.ok(await playwrightRun.getUser(inUse.id), 'the in-flight Playwright user survived every agent cleanup');
+  await playwrightRun.cleanup();
+});
+
+test('#7 passwords can be kept out of the text the model reads', async () => {
+  const quiet = new Client({ name: 'mcp-test-quiet', version: '1.0.0' });
+  await quiet.connect(serverTransport({ TEST_DATA_BASE_URL: app.url, TEST_DATA_HIDE_PASSWORDS: 'true' }));
+  try {
+    const r = (await quiet.callTool({ name: 'create_test_user', arguments: {} })) as ToolResult;
+    const pw = String(r.structuredContent?.password);
+    assert.ok(pw.length > 0);
+    assert.ok(!text(r).includes(pw), 'password not in the text');
+    await quiet.callTool({ name: 'cleanup_test_data', arguments: {} });
+  } finally {
+    await quiet.close();
+  }
 });
 
 test('the server refuses to start against a host that is not allowed', async () => {

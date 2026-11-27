@@ -57,10 +57,13 @@ Each tool is registered with a name, a description, an input schema, optional ou
 
 ```ts
 server.registerTool('cleanup_test_data', {
-  description: 'Delete test users ... Only ever deletes data tagged as test data ...',
-  inputSchema: { scope: z.enum(['run', 'all']).optional() },
+  description: 'Delete test users ... It can never delete another test run\'s fresh data ...',
+  inputSchema: {
+    scope: z.enum(['session', 'my_sessions', 'abandoned']).optional(),
+    older_than_minutes: z.number().int().min(60).optional(),
+  },
   annotations: { destructiveHint: true, idempotentHint: true },
-}, async ({ scope }) => run(() => client.cleanup(scope ?? 'run'), (n) => `Deleted ${n} test user(s).`));
+}, async ({ scope, older_than_minutes }) => run(() => client.cleanup(/* mapped scope */), (n) => `Deleted ${n} test user(s).`));
 ```
 
 - **Validation comes free:** a call with a product id that isn't in the enum is rejected before the
@@ -84,9 +87,25 @@ await testData.createUser({ label: 'regular', cart: ['backpack'], orders: 3, car
 // POST /api/test-data/users/:id/orders  x 3
 ```
 
-Every user gets the tags `test-data`, `run:<runId>` and `owner:<who>`. That one decision is what
-makes cleanup safe: `cleanup('run')` asks the app for users tagged with *this* run and deletes only
-those, so it works even after a crash, and can never delete real or seed users.
+Every user gets the tags `test-data`, `run:<runId>` and `owner:<who>` (and `group:<id>` for a
+Playwright run). That one decision is what makes cleanup safe: `cleanup('run')` asks the app for users
+tagged with *this* run and deletes only those, so it works even after a crash.
+
+| Cleanup scope | Deletes | Used by |
+|---|---|---|
+| `'run'` | What this client created | each Playwright worker, each agent session |
+| `'group'` | What any worker of this Playwright run created | global teardown |
+| `'owner'` | What this owner created in any run | an agent's "my_sessions" (owner is `mcp-<your username>`, so never a teammate's) |
+| `{ olderThanMinutes }` | Any test data nobody has *used* (logged in, changed cart or orders) for that long; 15 min minimum | an agent's "abandoned" |
+
+There is deliberately **no "delete everything"**: that would remove data another run is still using.
+And the app enforces the last line of defence itself: everything its test data API creates is tagged
+`test-data` (the `seed` tag is reserved), and it refuses to delete any user without that tag,
+whoever calls it.
+
+Two more safety details live in the client: run ids are **random** (an earlier clock-based id repeated
+every ~28 minutes and made sessions collide), and it **never follows redirects**, so the admin key
+can't be carried to a host that isn't on the allow-list.
 
 ## 5. The Playwright side (`e2e/fixtures.ts`)
 
@@ -97,7 +116,10 @@ those, so it works even after a crash, and can never delete real or seed users.
 | `user` | test | `makeUser()` with no options: a plain fresh user |
 | `loginAs` | test | Logs in through the real login form |
 
-Plus `globalTeardown`, a safety net that removes anything owned by `playwright-*` after the run.
+Plus `globalSetup`, which gives the whole run one group id (workers inherit it through
+`process.env`), and `globalTeardown`, a safety net that removes this run's leftovers only. Another
+run sharing the same app, a teammate's or another CI shard's, is never touched. Cleanup problems
+other than "already gone" show up as test annotations instead of being swallowed.
 
 The test then spends its time only on the behaviour it checks. Setup that isn't under test goes
 through the API.
@@ -109,7 +131,8 @@ through the API.
 | A demo app inside the repo | Runs anywhere, including CI, with nothing external; the test data API is under our control | Real apps rarely have a test data API; often you build one with the developers, or seed the database directly |
 | One fresh user per test | Parallel-safe by design (see the shared-user experiment: 4/4 failed) | More data to create; fine when creation takes milliseconds |
 | Tags instead of a local list of created ids | Cleanup survives crashes and restarts | The app has to store and filter by tags |
-| Host allow-list in the client, not just the server | The check sits in the one place every caller goes through | Must be set per environment (`TEST_DATA_ALLOWED_HOSTS`) |
+| Host allow-list in the client, plus rules in the app | The client stops bad targets early; the app enforces what may be deleted, whoever calls | Must be set per environment (`TEST_DATA_ALLOWED_HOSTS`) |
+| No "delete everything" cleanup | Shared environments have other runs' data in use | Truly orphaned data needs the age-based scope |
 | stdio transport | Simplest; the agent starts the server, no ports or auth | One client per server process. For a shared team server you'd use the HTTP transport |
 
 ## 7. Exercises

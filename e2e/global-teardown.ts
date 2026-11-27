@@ -1,12 +1,13 @@
 import { TestDataClient } from '../src/core/test-data.ts';
 
-/**
- * Safety net after the whole run: delete any test data a Playwright worker left behind
- * (for example after a crash). Only users tagged owner:playwright-* are removed.
- */
+/** Safety net after the run: delete anything this run's workers left behind (e.g. after a crash). */
 export default async function globalTeardown() {
-  const client = new TestDataClient({ owner: 'teardown' });
-  const leftovers = (await client.listUsers('all').catch(() => [])).filter((u) => u.tags.some((t) => t.startsWith('owner:playwright-')));
-  for (const u of leftovers) await client.deleteUser(u.id).catch(() => {});
-  if (leftovers.length) console.log(`global teardown: removed ${leftovers.length} leftover test user(s)`);
+  const groupId = process.env.TEST_DATA_GROUP_ID;
+  if (!groupId) return;
+  const client = new TestDataClient({ owner: 'teardown', groupId });
+  const removed = await client.cleanup('group').catch((e: Error) => {
+    console.warn(`global teardown: cleanup failed: ${e.message}`);
+    return 0;
+  });
+  if (removed) console.log(`global teardown: removed ${removed} leftover test user(s) from run ${groupId}`);
 }

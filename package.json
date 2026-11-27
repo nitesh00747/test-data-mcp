@@ -6,7 +6,7 @@
   "type": "module",
   "license": "MIT",
   "engines": {
-    "node": ">=20"
+    "node": ">=20.6"
   },
   "scripts": {
     "app": "tsx demo-app/server.ts",
@@ -16,7 +16,7 @@
     "test:unit": "node --import tsx --test test/*.test.ts",
     "test:e2e": "playwright test",
     "test:report": "playwright show-report",
-    "inspect": "npx @modelcontextprotocol/inspector node --import tsx src/mcp/server.ts"
+    "inspect": "npx -y @modelcontextprotocol/inspector@2.15.0 node --import tsx src/mcp/server.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
