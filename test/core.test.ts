@@ -4,7 +4,9 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { DEFAULT_ADMIN_KEY, startApp, testDataApiEnabled } from '../demo-app/server.ts';
+import { DEFAULT_ADMIN_KEY, sameKey, startApp, testDataApiEnabled } from '../demo-app/server.ts';
+import { mcpOwner } from '../src/mcp/server.ts';
+import globalSetup from '../e2e/global-setup.ts';
 import { TestDataClient, TestDataError, UserTracker, assertSafeTarget, newRunId } from '../src/core/test-data.ts';
 
 let app: Awaited<ReturnType<typeof startApp>>;
@@ -170,7 +172,7 @@ test('#4 #5 cleanup scopes never reach another run\'s fresh data', async () => {
   // stale: only data older than the cutoff, and the cutoff can't be tiny
   await assert.rejects(agent.cleanup({ olderThanMinutes: 1 }), /at least 15/);
   assert.equal(await agent.cleanup({ olderThanMinutes: 60 }), 0, 'fresh data is never "abandoned"');
-  app.store.user(other.id).createdAt = new Date(Date.now() - 3 * 3_600_000).toISOString();
+  app.store.user(other.id).lastUsedAt = new Date(Date.now() - 3 * 3_600_000).toISOString();
   assert.equal(await agent.cleanup({ olderThanMinutes: 120 }), 1);
   assert.equal(await exists(other.id), false);
 
@@ -196,6 +198,79 @@ test('#6 bad input gets a 400 with a reason, not a 500', async () => {
     assert.equal(res.status, 400, JSON.stringify(body));
     assert.ok(((await res.json()) as { error: string }).error);
   }
+});
+
+// ---------- second review ----------
+
+test('N1 each person\'s agent has its own owner, so "my sessions" cleanup spares teammates', async () => {
+  assert.equal(mcpOwner({ TEST_DATA_OWNER: 'mcp-ci' }), 'mcp-ci');
+  assert.match(mcpOwner({}), /^mcp-.+/);
+  const alice = new TestDataClient({ baseUrl: app.url, owner: 'mcp-alice' });
+  const bob = new TestDataClient({ baseUrl: app.url, owner: 'mcp-bob' });
+  const hers = await alice.createUser();
+  await bob.createUser();
+  assert.equal(await bob.cleanup('owner'), 1);
+  assert.ok(await alice.getUser(hers.id), "Alice's user survived Bob's cleanup");
+  await alice.cleanup();
+});
+
+test('N2 "abandoned" goes by last use, so old data still in use is kept', async () => {
+  const sweeper = new TestDataClient({ baseUrl: app.url, owner: 'sweeper' });
+  const explorer = new TestDataClient({ baseUrl: app.url, owner: 'mcp-explorer' });
+  const inUse = await explorer.createUser();
+  const forgotten = await explorer.createUser();
+  const threeHoursAgo = new Date(Date.now() - 3 * 3_600_000).toISOString();
+  for (const id of [inUse.id, forgotten.id]) Object.assign(app.store.user(id), { createdAt: threeHoursAgo, lastUsedAt: threeHoursAgo });
+
+  // Someone logs in as the first user just now: that counts as use
+  const login = await fetch(`${app.url}/api/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: inUse.username, password: inUse.password }) });
+  assert.equal(login.status, 200);
+
+  assert.equal(await sweeper.cleanup({ olderThanMinutes: 120 }), 1);
+  assert.ok(await explorer.getUser(inUse.id), 'recently used user kept');
+  await assert.rejects(explorer.getUser(forgotten.id), (e: TestDataError) => e.status === 404);
+  await explorer.cleanup();
+});
+
+test('N3 everything the test data API creates is tagged test-data, and "seed" is reserved', async () => {
+  const bad = await fetch(`${app.url}/api/test-data/users`, { method: 'POST', headers: admin, body: JSON.stringify({ tags: ['seed'] }) });
+  assert.equal(bad.status, 400);
+  const untagged = await fetch(`${app.url}/api/test-data/users`, { method: 'POST', headers: admin, body: JSON.stringify({ tags: ['whatever'] }) });
+  const u = (await untagged.json()) as { id: string; tags: string[] };
+  assert.deepEqual(u.tags, ['test-data', 'whatever']);
+  assert.equal((await fetch(`${app.url}/api/test-data/users/${u.id}`, { method: 'DELETE', headers: admin })).status, 200, 'so it can always be cleaned up');
+});
+
+test('N4 every Playwright run gets a fresh group id, even if one was set from outside', async () => {
+  const before = process.env.TEST_DATA_GROUP_ID;
+  process.env.TEST_DATA_GROUP_ID = 'shared-by-mistake';
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    await globalSetup();
+    const first = process.env.TEST_DATA_GROUP_ID;
+    await globalSetup();
+    assert.notEqual(first, 'shared-by-mistake');
+    assert.notEqual(process.env.TEST_DATA_GROUP_ID, first);
+  } finally {
+    console.warn = warn;
+    if (before === undefined) delete process.env.TEST_DATA_GROUP_ID;
+    else process.env.TEST_DATA_GROUP_ID = before;
+  }
+});
+
+test('N5 logins expire, and the admin key check is constant-time', async () => {
+  const u = await client.createUser();
+  const { token } = (await (await fetch(`${app.url}/api/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: u.username, password: u.password }) })).json()) as { token: string };
+  const cart = () => fetch(`${app.url}/api/cart`, { headers: { authorization: `Bearer ${token}` } });
+  assert.equal((await cart()).status, 200);
+  app.store.expireSession(token);
+  assert.equal((await cart()).status, 401);
+
+  assert.equal(sameKey('local-admin-key', 'local-admin-key'), true);
+  assert.equal(sameKey('local-admin-ke', 'local-admin-key'), false, 'different length: no throw, just false');
+  assert.equal(sameKey(undefined, 'local-admin-key'), false);
+  assert.equal(sameKey(['local-admin-key'], 'local-admin-key'), false);
 });
 
 test('cleanup', async () => {

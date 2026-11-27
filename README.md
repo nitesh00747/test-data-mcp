@@ -79,7 +79,7 @@ test('an expired card is declined and the cart is kept', async ({ page, makeUser
 | Tool | `create_test_user` | A unique user, optionally `locked`, with an `expired` card, a cart and past orders. Returns the login |
 | Tool | `add_to_cart`, `create_order` | Add to an existing test user |
 | Tool | `get_test_user`, `list_test_data` | Read-only lookups |
-| Tool | `cleanup_test_data` | Delete this session's data, every agent session's, or abandoned leftovers (older than an hour or more). Never another run's fresh data. Marked destructive |
+| Tool | `cleanup_test_data` | Delete this session's data, all your agent sessions' data, or abandoned leftovers (unused for an hour or more). Never another run's or a teammate's data in use. Marked destructive |
 | Resource | `test-data://products`, `test-data://guide` | The product catalogue, and the rules for using test data |
 | Prompt | `test_with_fresh_data` | "Write a Playwright test for *scenario*", with the right setup steps |
 
@@ -89,7 +89,10 @@ test('an expired card is declined and the cart is kept', async ({ page, makeUser
 - **Tagged:** everything created carries `test-data`, `run:<id>` and `owner:<who>` (plus `group:<id>`
   for a whole Playwright run). Cleanup deletes only its own tags, so it never touches another run's
   data, real users or seed users. Teardown removes only this run's leftovers.
-- **Enforced by the app too:** the test data API refuses to delete any user not tagged `test-data`.
+- **Enforced by the app too:** everything the test data API creates is tagged `test-data`, and it
+  refuses to delete any user without that tag. Logins expire after 8 hours.
+- **Per person and per run:** agent data is owned by `mcp-<your username>`, each Playwright run gets
+  a fresh group id, and "abandoned" means unused, not just old.
 - **Safe host:** it refuses any host except localhost unless you add it to `TEST_DATA_ALLOWED_HOSTS`,
   and never follows redirects, so the admin key can't be sent anywhere else.
 - **Admin key:** the test data API needs the `x-admin-key` header (`ADMIN_KEY`). It switches itself off

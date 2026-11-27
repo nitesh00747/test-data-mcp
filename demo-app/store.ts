@@ -22,7 +22,12 @@ export type User = {
   /** Labels set by whoever created the user. Test data uses them to find and clean up its own users. */
   tags: string[];
   createdAt: string;
+  /** Last time anyone logged in as this user or changed its data. "Abandoned" cleanup goes by this. */
+  lastUsedAt: string;
 };
+
+/** How long a login lasts. */
+export const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 
 export const PRODUCTS: Product[] = [
   { id: 'backpack', name: 'Travel Backpack', price: 49.99 },
@@ -56,7 +61,7 @@ export function isExpired(expiry: string, now = new Date()): boolean {
 export class Store {
   private users = new Map<string, User>();
   private orders = new Map<string, Order>();
-  private sessions = new Map<string, string>(); // token -> userId
+  private sessions = new Map<string, { userId: string; expiresAt: number }>();
 
   constructor() {
     this.seed();
@@ -92,6 +97,7 @@ export class Store {
       cart: [],
       tags: input.tags ?? [],
       createdAt: new Date().toISOString(),
+      lastUsedAt: new Date().toISOString(),
     };
     this.users.set(user.id, user);
     return user;
@@ -103,6 +109,11 @@ export class Store {
     return u;
   }
 
+  /** Record that a user is in use (login, cart or order changes). */
+  touch(u: User, now = Date.now()) {
+    u.lastUsedAt = new Date(now).toISOString();
+  }
+
   findUsers(tag?: string): User[] {
     return [...this.users.values()].filter((u) => !tag || u.tags.includes(tag));
   }
@@ -111,7 +122,7 @@ export class Store {
     this.user(id);
     this.users.delete(id);
     for (const [oid, o] of this.orders) if (o.userId === id) this.orders.delete(oid);
-    for (const [t, uid] of this.sessions) if (uid === id) this.sessions.delete(t);
+    for (const [t, sess] of this.sessions) if (sess.userId === id) this.sessions.delete(t);
   }
 
   // ---------- auth ----------
@@ -121,13 +132,32 @@ export class Store {
     if (!u || u.password !== password) throw new HttpError(401, 'Username or password is incorrect.');
     if (u.status === 'locked') throw new HttpError(403, 'This account is locked.');
     const token = randomBytes(16).toString('hex');
-    this.sessions.set(token, u.id);
+    this.sessions.set(token, { userId: u.id, expiresAt: Date.now() + SESSION_TTL_MS });
+    this.touch(u);
+    this.pruneSessions();
     return token;
   }
 
-  userForToken(token: string | undefined): User | undefined {
-    const id = token ? this.sessions.get(token) : undefined;
-    return id ? this.users.get(id) : undefined;
+  /** The logged-in user for a token, or undefined if the token is unknown or has expired. */
+  userForToken(token: string | undefined, now = Date.now()): User | undefined {
+    const sess = token ? this.sessions.get(token) : undefined;
+    if (!sess) return undefined;
+    if (sess.expiresAt <= now) {
+      this.sessions.delete(token!);
+      return undefined;
+    }
+    return this.users.get(sess.userId);
+  }
+
+  /** Drop expired logins so the session table can't grow forever. */
+  private pruneSessions(now = Date.now()) {
+    for (const [t, sess] of this.sessions) if (sess.expiresAt <= now) this.sessions.delete(t);
+  }
+
+  /** For tests: make a session look older. */
+  expireSession(token: string) {
+    const sess = this.sessions.get(token);
+    if (sess) sess.expiresAt = 0;
   }
 
   logout(token: string) {
@@ -140,6 +170,7 @@ export class Store {
     const u = this.user(userId);
     this.product(productId);
     if (!Number.isInteger(qty) || qty < 1 || qty > 99) throw new HttpError(400, 'qty must be 1-99');
+    this.touch(u);
     const line = u.cart.find((l) => l.productId === productId);
     if (line) line.qty = Math.min(99, line.qty + qty);
     else u.cart.push({ productId, qty });
@@ -147,6 +178,7 @@ export class Store {
 
   removeFromCart(userId: string, productId: string) {
     const u = this.user(userId);
+    this.touch(u);
     u.cart = u.cart.filter((l) => l.productId !== productId);
   }
 
@@ -166,7 +198,7 @@ export class Store {
 
   /** Create an order directly (used by checkout, and by the test data API to build order history). */
   placeOrder(userId: string, lines: CartLine[], status: OrderStatus, createdAt = new Date()): Order {
-    this.user(userId);
+    this.touch(this.user(userId));
     if (lines.length === 0) throw new HttpError(400, 'an order needs at least one line');
     lines.forEach((l) => this.product(l.productId));
     const order: Order = {

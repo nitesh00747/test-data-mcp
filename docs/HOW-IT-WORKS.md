@@ -95,12 +95,13 @@ tagged with *this* run and deletes only those, so it works even after a crash.
 |---|---|---|
 | `'run'` | What this client created | each Playwright worker, each agent session |
 | `'group'` | What any worker of this Playwright run created | global teardown |
-| `'owner'` | What this owner created in any run | an agent's "my_sessions" |
-| `{ olderThanMinutes }` | Any test data older than the cutoff (15 min minimum) | an agent's "abandoned" |
+| `'owner'` | What this owner created in any run | an agent's "my_sessions" (owner is `mcp-<your username>`, so never a teammate's) |
+| `{ olderThanMinutes }` | Any test data nobody has *used* (logged in, changed cart or orders) for that long; 15 min minimum | an agent's "abandoned" |
 
 There is deliberately **no "delete everything"**: that would remove data another run is still using.
-And the app enforces the last line of defence itself: its test data API refuses to delete any user
-not tagged `test-data`, whoever calls it.
+And the app enforces the last line of defence itself: everything its test data API creates is tagged
+`test-data` (the `seed` tag is reserved), and it refuses to delete any user without that tag,
+whoever calls it.
 
 Two more safety details live in the client: run ids are **random** (an earlier clock-based id repeated
 every ~28 minutes and made sessions collide), and it **never follows redirects**, so the admin key

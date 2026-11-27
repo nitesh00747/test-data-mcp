@@ -6,5 +6,10 @@ import { newRunId } from '../src/core/test-data.ts';
  * never another run's (a teammate's, or another CI shard's) data that is still in use.
  */
 export default async function globalSetup() {
-  process.env.TEST_DATA_GROUP_ID ??= newRunId('pw');
+  // Always a new id. Reusing one set from outside (e.g. the same value on two CI shards) would put
+  // two runs in one group, and each run's teardown would delete the other's data.
+  if (process.env.TEST_DATA_GROUP_ID) {
+    console.warn(`TEST_DATA_GROUP_ID was already set (${process.env.TEST_DATA_GROUP_ID}); using a fresh id instead so runs never share a group.`);
+  }
+  process.env.TEST_DATA_GROUP_ID = newRunId('pw');
 }

@@ -13,6 +13,7 @@
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { userInfo } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { z } from 'zod';
 import { PRODUCT_IDS, TestDataClient, TestDataError, newRunId, type CartItem, type CleanupScope } from '../core/test-data.ts';
@@ -35,6 +36,21 @@ async function run<T>(fn: () => Promise<T>, format: (r: T) => string, structured
     log(message);
     return { content: [{ type: 'text' as const, text: message }], isError: true };
   }
+}
+
+/**
+ * Whose agent this is: TEST_DATA_OWNER, or "mcp-<your OS username>". Per person, so on a shared
+ * test environment one person's "my_sessions" cleanup never removes a teammate's data.
+ */
+export function mcpOwner(env = process.env): string {
+  if (env.TEST_DATA_OWNER) return env.TEST_DATA_OWNER;
+  let who = 'unknown';
+  try {
+    who = userInfo().username || who;
+  } catch {
+    // no user info in some containers
+  }
+  return `mcp-${who}`;
 }
 
 export type ServerOptions = {
@@ -155,8 +171,8 @@ export function createServer(client: TestDataClient, opts: ServerOptions = {}) {
       title: 'Delete test data',
       description:
         'Delete test users and their orders. "session" (default): what this session created. ' +
-        '"my_sessions": what any agent session created. "abandoned": any test data older than ' +
-        'older_than_minutes (default 120, at least 60), i.e. leftovers nobody is using. ' +
+        '"my_sessions": what any of your agent sessions created. "abandoned": any test data nobody has ' +
+        'used (logged in, changed cart or orders) for older_than_minutes (default 120, at least 60). ' +
         'It can never delete another test run\'s fresh data, real users or seed users.',
       inputSchema: {
         scope: z.enum(['session', 'my_sessions', 'abandoned']).optional(),
@@ -242,7 +258,7 @@ export function createServer(client: TestDataClient, opts: ServerOptions = {}) {
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   try {
     // A random id per session: a clock-based one repeated every ~28 minutes and made sessions collide.
-    const client = new TestDataClient({ owner: 'mcp', runId: newRunId('mcp') });
+    const client = new TestDataClient({ owner: mcpOwner(), runId: newRunId('mcp') });
     const transport = new StdioServerTransport();
     await createServer(client, { hidePasswords: process.env.TEST_DATA_HIDE_PASSWORDS === 'true' }).connect(transport);
     log(`ready: app ${client.baseUrl}, run ${client.runId}`);

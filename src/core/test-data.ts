@@ -75,7 +75,7 @@ export type CleanupScope =
   | 'run' // created by this client
   | 'group' // created by any client in this client's group (e.g. this Playwright run)
   | 'owner' // created by this owner in any run (e.g. every MCP session)
-  | { olderThanMinutes: number }; // any test data older than this: abandoned leftovers
+  | { olderThanMinutes: number }; // any test data nobody has used for this long: abandoned leftovers
 
 /** A random id. Never derived from the clock: clock-based ids repeat and then collide. */
 export const newRunId = (prefix = '') => `${prefix}${randomBytes(4).toString('hex')}`;
@@ -243,14 +243,15 @@ export class TestDataClient {
 
   /**
    * Delete test data and return how many users went. Scopes: this client's run (default), its group,
-   * its owner, or any test data older than N minutes (abandoned leftovers, never data in use).
+   * its owner, or any test data unused for N minutes (abandoned leftovers, never data in use).
    */
   async cleanup(scope: CleanupScope = 'run'): Promise<number> {
     let users: ListedUser[];
     if (typeof scope === 'object') {
       if (!(scope.olderThanMinutes >= 15)) throw new TestDataError('olderThanMinutes must be at least 15, so data in use is never removed');
       const cutoff = Date.now() - scope.olderThanMinutes * 60_000;
-      users = (await this.listUsers('all')).filter((u) => Date.parse(u.createdAt) < cutoff);
+      // "Abandoned" means not *used* for a while (no login, cart or order change), not just created long ago.
+      users = (await this.listUsers('all')).filter((u) => Date.parse(u.lastUsedAt ?? u.createdAt) < cutoff);
     } else {
       users = await this.listUsers(scope);
     }
@@ -267,7 +268,7 @@ export class TestDataClient {
   }
 }
 
-export type ListedUser = { id: string; username: string; tags: string[]; orders: number; createdAt: string };
+export type ListedUser = { id: string; username: string; tags: string[]; orders: number; createdAt: string; lastUsedAt?: string };
 
 /**
  * Remembers what a test created and deletes it afterwards. A user that is already gone is fine;

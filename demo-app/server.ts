@@ -8,6 +8,7 @@
  * Real teams usually get a "test data API" like /api/test-data from their developers, or build one
  * on top of the database. It is what makes fast, isolated test setup possible.
  */
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { pathToFileURL } from 'node:url';
 import { HttpError, PRODUCTS, Store, isExpired, publicUser, type OrderStatus, type User } from './store.ts';
@@ -59,8 +60,15 @@ function apiUser(ctx: Ctx): User {
   return u;
 }
 
+/** Compare keys in constant time (hashing first makes the lengths equal), so timing reveals nothing. */
+export function sameKey(given: unknown, expected: string): boolean {
+  if (typeof given !== 'string') return false;
+  const h = (v: string) => createHash('sha256').update(v).digest();
+  return timingSafeEqual(h(given), h(expected));
+}
+
 function requireAdmin(ctx: Ctx) {
-  if (ctx.req.headers['x-admin-key'] !== ctx.adminKey) throw new HttpError(403, 'test data API needs a valid x-admin-key header');
+  if (!sameKey(ctx.req.headers['x-admin-key'], ctx.adminKey)) throw new HttpError(403, 'test data API needs a valid x-admin-key header');
 }
 
 const str = (v: unknown, name: string, required = false): string | undefined => {
@@ -113,7 +121,11 @@ async function handle(ctx: Ctx): Promise<void> {
       if (status !== 'active' && status !== 'locked') throw new HttpError(400, 'status must be active or locked');
       const expiry = str(b.cardExpiry, 'cardExpiry');
       if (expiry && !/^\d{2}\/\d{2}$/.test(expiry)) throw new HttpError(400, 'cardExpiry must be MM/YY');
-      const tags = Array.isArray(b.tags) ? b.tags.map(String) : [];
+      // Everything this API creates is test data, whatever the caller sends: so it can always be found
+      // and cleaned up through this API, and it can never pose as a permanent seed user.
+      const requested = Array.isArray(b.tags) ? b.tags.map(String) : [];
+      if (requested.includes('seed')) throw new HttpError(400, 'the "seed" tag is reserved for permanent users');
+      const tags = ['test-data', ...requested.filter((t) => t !== 'test-data')];
       const u = store.createUser({
         username: str(b.username, 'username'),
         password: str(b.password, 'password'),
