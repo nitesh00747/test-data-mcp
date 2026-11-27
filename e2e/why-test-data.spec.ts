@@ -17,9 +17,9 @@ test.describe('Why test data matters', () => {
     await expect(page.getByTestId('cart-count')).toHaveText('3');
     const uiMs = Date.now() - viaUi;
 
+    // Recorded, not asserted: timings vary by machine, and a test shouldn't fail on a slow CI runner.
     test.info().annotations.push({ type: 'setup time', description: `API: ${apiMs} ms, UI: ${uiMs} ms` });
     console.log(`3-item cart setup  API: ${apiMs} ms  UI: ${uiMs} ms`);
-    expect(apiMs).toBeLessThan(uiMs);
   });
 
   // These run at the same time (fullyParallel). Each changes its cart and checks the exact count.

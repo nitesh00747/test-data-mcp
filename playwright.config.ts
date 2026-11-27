@@ -10,6 +10,7 @@ export default defineConfig({
   retries: 0, // fresh data per test means there is nothing to retry around
   workers: process.env.CI ? 4 : undefined,
   reporter: [['list'], ['html', { open: 'never' }], ['junit', { outputFile: 'test-results/junit.xml' }]],
+  globalSetup: './e2e/global-setup.ts',
   globalTeardown: './e2e/global-teardown.ts',
   use: {
     baseURL: BASE_URL,

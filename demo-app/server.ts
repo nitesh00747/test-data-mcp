@@ -15,7 +15,7 @@ import { cartPage, loginPage, ordersPage, shopPage } from './views.ts';
 
 export const DEFAULT_ADMIN_KEY = 'local-admin-key';
 
-type Ctx = { req: IncomingMessage; res: ServerResponse; url: URL; store: Store; adminKey: string };
+type Ctx = { req: IncomingMessage; res: ServerResponse; url: URL; store: Store; adminKey: string; testDataApi: boolean };
 
 const json = (res: ServerResponse, status: number, body: unknown) => {
   res.writeHead(status, { 'content-type': 'application/json' });
@@ -105,6 +105,7 @@ async function handle(ctx: Ctx): Promise<void> {
 
   // ---- test data API (admin) ----
   if (path.startsWith('/api/test-data/')) {
+    if (!ctx.testDataApi) throw new HttpError(404, 'the test data API is turned off on this server');
     requireAdmin(ctx);
     if (method === 'POST' && path === '/api/test-data/users') {
       const b = await readBody(req);
@@ -134,7 +135,8 @@ async function handle(ctx: Ctx): Promise<void> {
         return json(res, 200, { ...publicUser(u, store), cart: u.cart, orderList: store.ordersFor(id) });
       }
       if (method === 'DELETE') {
-        if (store.user(id).tags.includes('seed')) throw new HttpError(403, 'seed users are permanent');
+        // Enforced here, not only in the client: this API may only ever delete test data.
+        if (!store.user(id).tags.includes('test-data')) throw new HttpError(403, 'only users tagged test-data can be deleted through the test data API');
         store.deleteUser(id);
         return json(res, 200, { deleted: id });
       }
@@ -150,8 +152,14 @@ async function handle(ctx: Ctx): Promise<void> {
       const b = await readBody(req);
       const status = (str(b.status, 'status') ?? 'placed') as OrderStatus;
       if (!['placed', 'shipped', 'cancelled'].includes(status)) throw new HttpError(400, 'status must be placed, shipped or cancelled');
+      if (b.items !== undefined && !Array.isArray(b.items)) throw new HttpError(400, 'items must be an array of { productId, qty }');
       const items = Array.isArray(b.items) && b.items.length ? b.items : [{ productId: 'coffee-mug', qty: 1 }];
+      for (const i of items) {
+        const qty = Number(i?.qty ?? 1);
+        if (!Number.isInteger(qty) || qty < 1 || qty > 99) throw new HttpError(400, 'qty must be 1-99');
+      }
       const daysAgo = Number(b.daysAgo ?? 0);
+      if (!Number.isInteger(daysAgo) || daysAgo < 0 || daysAgo > 3650) throw new HttpError(400, 'daysAgo must be a whole number from 0 to 3650');
       const when = new Date(Date.now() - daysAgo * 86_400_000);
       const order = store.placeOrder(m[1], items.map((i: { productId?: unknown; qty?: unknown }) => ({ productId: String(i.productId), qty: Number(i.qty ?? 1) })), status, when);
       return json(res, 201, order);
@@ -207,23 +215,43 @@ async function handle(ctx: Ctx): Promise<void> {
   throw new HttpError(404, `Not found: ${method} ${path}`);
 }
 
-export function startApp(opts: { port?: number; adminKey?: string; store?: Store } = {}) {
+const LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1']);
+
+/**
+ * Should this server offer the test data API? Off when ENABLE_TEST_DATA_API=false. Also off when the
+ * server listens beyond this machine but still uses the public default key: anyone who read the
+ * README could then create and delete users.
+ */
+export function testDataApiEnabled(host: string, adminKey: string, env = process.env): { enabled: boolean; reason?: string } {
+  if (env.ENABLE_TEST_DATA_API === 'false') return { enabled: false, reason: 'ENABLE_TEST_DATA_API=false' };
+  if (!LOOPBACK.has(host) && adminKey === DEFAULT_ADMIN_KEY) {
+    return { enabled: false, reason: `listening on ${host} with the default admin key; set ADMIN_KEY to enable it` };
+  }
+  return { enabled: true };
+}
+
+export function startApp(opts: { port?: number; host?: string; adminKey?: string; store?: Store; env?: NodeJS.ProcessEnv } = {}) {
+  const env = opts.env ?? process.env;
   const store = opts.store ?? new Store();
-  const adminKey = opts.adminKey ?? process.env.ADMIN_KEY ?? DEFAULT_ADMIN_KEY;
+  const adminKey = opts.adminKey ?? env.ADMIN_KEY ?? DEFAULT_ADMIN_KEY;
+  const host = opts.host ?? env.HOST ?? '127.0.0.1';
+  const api = testDataApiEnabled(host, adminKey, env);
+  if (!api.enabled) console.warn(`Test data API is OFF: ${api.reason}`);
   const server = createServer((req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost');
-    handle({ req, res, url, store, adminKey }).catch((e) => {
+    handle({ req, res, url, store, adminKey, testDataApi: api.enabled }).catch((e) => {
       const status = e instanceof HttpError ? e.status : 500;
       if (status === 500) console.error(e);
       if (url.pathname.startsWith('/api/')) json(res, status, { error: e.message });
       else html(res, status, `<h1>${status}</h1><p data-test="error">${String(e.message).replace(/</g, '&lt;')}</p>`);
     });
   });
-  return new Promise<{ url: string; close: () => Promise<void>; store: Store }>((resolve) => {
-    server.listen(opts.port ?? Number(process.env.PORT ?? 3100), '127.0.0.1', () => {
+  return new Promise<{ url: string; close: () => Promise<void>; store: Store; testDataApi: boolean }>((resolve) => {
+    server.listen(opts.port ?? Number(env.PORT ?? 3100), host, () => {
       const addr = server.address();
       const port = typeof addr === 'object' && addr ? addr.port : 0;
-      resolve({ url: `http://127.0.0.1:${port}`, store, close: () => new Promise((r) => server.close(() => r())) });
+      const shownHost = host.includes(':') ? `[${host}]` : host === '0.0.0.0' ? '127.0.0.1' : host;
+      resolve({ url: `http://${shownHost}:${port}`, store, testDataApi: api.enabled, close: () => new Promise((r) => server.close(() => r())) });
     });
   });
 }

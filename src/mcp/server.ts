@@ -15,7 +15,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { pathToFileURL } from 'node:url';
 import { z } from 'zod';
-import { PRODUCT_IDS, TestDataClient, TestDataError, type CartItem } from '../core/test-data.ts';
+import { PRODUCT_IDS, TestDataClient, TestDataError, newRunId, type CartItem, type CleanupScope } from '../core/test-data.ts';
 
 const log = (...args: unknown[]) => console.error('[test-data-mcp]', ...args);
 
@@ -37,7 +37,12 @@ async function run<T>(fn: () => Promise<T>, format: (r: T) => string, structured
   }
 }
 
-export function createServer(client: TestDataClient) {
+export type ServerOptions = {
+  /** Keep passwords out of the text the model reads; they stay in structuredContent only. */
+  hidePasswords?: boolean;
+};
+
+export function createServer(client: TestDataClient, opts: ServerOptions = {}) {
   const server = new McpServer({ name: 'test-data', version: '0.1.0' });
 
   // ---------------- tools ----------------
@@ -73,7 +78,9 @@ export function createServer(client: TestDataClient) {
         () => client.createUser(args as Parameters<TestDataClient['createUser']>[0]),
         (u) =>
           [
-            `Created user ${u.username} (password: ${u.password}, id: ${u.id}).`,
+            opts.hidePasswords
+              ? `Created user ${u.username} (id: ${u.id}). The password is in the structured result only.`
+              : `Created user ${u.username} (password: ${u.password}, id: ${u.id}). Throwaway test credentials.`,
             `Status: ${u.status}. Card expires ${u.cardExpiry}.`,
             `Cart: ${u.cartItems} item(s). Past orders: ${u.orderIds.length}.`,
             `Log in at ${client.baseUrl}/ with these credentials. Remove it with cleanup_test_data when done.`,
@@ -147,12 +154,21 @@ export function createServer(client: TestDataClient) {
     {
       title: 'Delete test data',
       description:
-        'Delete test users and their orders: only this session\'s ("run", default) or every run\'s ("all"). ' +
-        'Only ever deletes data tagged as test data; real or seed users are never touched.',
-      inputSchema: { scope: z.enum(['run', 'all']).optional() },
+        'Delete test users and their orders. "session" (default): what this session created. ' +
+        '"my_sessions": what any agent session created. "abandoned": any test data older than ' +
+        'older_than_minutes (default 120, at least 60), i.e. leftovers nobody is using. ' +
+        'It can never delete another test run\'s fresh data, real users or seed users.',
+      inputSchema: {
+        scope: z.enum(['session', 'my_sessions', 'abandoned']).optional(),
+        older_than_minutes: z.number().int().min(60).max(100_000).optional().describe('Only for "abandoned"'),
+      },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     },
-    async ({ scope }) => run(() => client.cleanup(scope ?? 'run'), (n) => `Deleted ${n} test user(s).`),
+    async ({ scope, older_than_minutes }) => {
+      const mapped: CleanupScope =
+        scope === 'my_sessions' ? 'owner' : scope === 'abandoned' ? { olderThanMinutes: older_than_minutes ?? 120 } : 'run';
+      return run(() => client.cleanup(mapped), (n) => `Deleted ${n} test user(s).`);
+    },
   );
 
   // ---------------- resources ----------------
@@ -162,7 +178,8 @@ export function createServer(client: TestDataClient) {
     'test-data://products',
     { title: 'Product catalogue', description: 'Product ids you can put in carts and orders', mimeType: 'application/json' },
     async (uri) => {
-      const res = await fetch(`${client.baseUrl}/api/products`);
+      const res = await fetch(`${client.baseUrl}/api/products`, { redirect: 'error' }).catch(() => undefined);
+      if (!res?.ok) throw new Error(`Can't load products from ${client.baseUrl}. Is the app running? Try: npm run app`);
       return { contents: [{ uri: uri.href, mimeType: 'application/json', text: await res.text() }] };
     },
   );
@@ -224,9 +241,10 @@ export function createServer(client: TestDataClient) {
 // Run directly (this is what Claude Code starts, see .mcp.json)
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   try {
-    const client = new TestDataClient({ owner: 'mcp', runId: `mcp${Date.now().toString(36).slice(-4)}` });
+    // A random id per session: a clock-based one repeated every ~28 minutes and made sessions collide.
+    const client = new TestDataClient({ owner: 'mcp', runId: newRunId('mcp') });
     const transport = new StdioServerTransport();
-    await createServer(client).connect(transport);
+    await createServer(client, { hidePasswords: process.env.TEST_DATA_HIDE_PASSWORDS === 'true' }).connect(transport);
     log(`ready: app ${client.baseUrl}, run ${client.runId}`);
   } catch (e) {
     log((e as Error).message);

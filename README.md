@@ -28,7 +28,7 @@ server. Either way the data is built the same way.
 
 ## What it proves
 
-All measured in this repo (`e2e/why-test-data.spec.ts`):
+Measured in this repo on one local run (`e2e/why-test-data.spec.ts`); your timings will differ:
 
 | Experiment | Result |
 |---|---|
@@ -79,18 +79,23 @@ test('an expired card is declined and the cart is kept', async ({ page, makeUser
 | Tool | `create_test_user` | A unique user, optionally `locked`, with an `expired` card, a cart and past orders. Returns the login |
 | Tool | `add_to_cart`, `create_order` | Add to an existing test user |
 | Tool | `get_test_user`, `list_test_data` | Read-only lookups |
-| Tool | `cleanup_test_data` | Delete this session's test data (or every run's). Marked destructive |
+| Tool | `cleanup_test_data` | Delete this session's data, every agent session's, or abandoned leftovers (older than an hour or more). Never another run's fresh data. Marked destructive |
 | Resource | `test-data://products`, `test-data://guide` | The product catalogue, and the rules for using test data |
 | Prompt | `test_with_fresh_data` | "Write a Playwright test for *scenario*", with the right setup steps |
 
 ## Safety rules built in
 
 - **Unique:** every username is `label_run_counter`, so parallel tests never share data.
-- **Tagged:** everything created carries `test-data`, `run:<id>` and `owner:<who>`. Cleanup deletes
-  only those, never real or seed users. A global teardown catches anything a crashed test left.
-- **Safe host:** it refuses any host except localhost unless you add it to `TEST_DATA_ALLOWED_HOSTS`.
-  Test data tools must never point at production.
-- **Admin key:** the shop's test data API needs the `x-admin-key` header (`ADMIN_KEY`).
+- **Tagged:** everything created carries `test-data`, `run:<id>` and `owner:<who>` (plus `group:<id>`
+  for a whole Playwright run). Cleanup deletes only its own tags, so it never touches another run's
+  data, real users or seed users. Teardown removes only this run's leftovers.
+- **Enforced by the app too:** the test data API refuses to delete any user not tagged `test-data`.
+- **Safe host:** it refuses any host except localhost unless you add it to `TEST_DATA_ALLOWED_HOSTS`,
+  and never follows redirects, so the admin key can't be sent anywhere else.
+- **Admin key:** the test data API needs the `x-admin-key` header (`ADMIN_KEY`). It switches itself off
+  if the app listens beyond localhost with the public default key, or with `ENABLE_TEST_DATA_API=false`.
+- **Passwords:** throwaway, and deleted with the user. Set `TEST_DATA_HIDE_PASSWORDS=true` to keep
+  them out of the agent's chat (structured result only).
 
 ## Project layout
 

@@ -1,7 +1,7 @@
 /**
  * Playwright fixtures for test data.
  *
- *   testData   one TestDataClient per worker, tagged with the worker, so parallel workers never mix data
+ *   testData   one TestDataClient per worker, tagged with the worker and this run's group
  *   user       a fresh, plain user for this test, deleted afterwards
  *   makeUser   build users from a recipe: makeUser({ cart: ['backpack'], card: 'expired' })
  *   loginAs    log in through the UI as a given user
@@ -10,7 +10,7 @@
  * remove it when the test ends, pass or fail.
  */
 import { test as base, expect, type Page } from '@playwright/test';
-import { TestDataClient, type TestUser, type UserRecipe } from '../src/core/test-data.ts';
+import { TestDataClient, UserTracker, type TestUser, type UserRecipe } from '../src/core/test-data.ts';
 
 type TestFixtures = {
   user: TestUser;
@@ -22,7 +22,7 @@ type WorkerFixtures = { testData: TestDataClient };
 export const test = base.extend<TestFixtures, WorkerFixtures>({
   testData: [
     async ({}, use, workerInfo) => {
-      const client = new TestDataClient({ owner: `playwright-w${workerInfo.workerIndex}` });
+      const client = new TestDataClient({ owner: `playwright-w${workerInfo.workerIndex}`, groupId: process.env.TEST_DATA_GROUP_ID });
       await use(client);
       await client.cleanup('run'); // anything a test left behind in this worker
     },
@@ -30,14 +30,17 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
   ],
 
   makeUser: async ({ testData }, use, testInfo) => {
-    const created: TestUser[] = [];
+    const tracker = new UserTracker(testData);
     await use(async (recipe = {}) => {
-      const u = await testData.createUser({ label: recipe.label ?? testInfo.title.split(' ').slice(0, 3).join('_'), ...recipe });
-      created.push(u);
+      const u = tracker.track(await testData.createUser({ label: recipe.label ?? testInfo.title.split(' ').slice(0, 3).join('_'), ...recipe }));
       testInfo.annotations.push({ type: 'test user', description: `${u.username} (${u.id})` });
       return u;
     });
-    for (const u of created) await testData.deleteUser(u.id).catch(() => {}); // already gone is fine
+    // Runs whether the test passed or failed. Problems are reported, not swallowed.
+    for (const problem of await tracker.dispose()) {
+      testInfo.annotations.push({ type: 'cleanup problem', description: problem });
+      console.warn(`[test data] cleanup problem in "${testInfo.title}": ${problem}`);
+    }
   },
 
   user: async ({ makeUser }, use) => {
