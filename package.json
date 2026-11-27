@@ -1,0 +1,35 @@
+{
+  "name": "test-data-mcp",
+  "version": "0.1.0",
+  "description": "A test data MCP server: fresh, isolated test data on request for Playwright tests and AI agents, with automatic cleanup.",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "app": "tsx demo-app/server.ts",
+    "mcp": "tsx src/mcp/server.ts",
+    "typecheck": "tsc -p .",
+    "test": "npm run test:unit && npm run test:e2e",
+    "test:unit": "node --import tsx --test test/*.test.ts",
+    "test:e2e": "playwright test",
+    "test:report": "playwright show-report",
+    "inspect": "npx @modelcontextprotocol/inspector node --import tsx src/mcp/server.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "@types/node": "^22.20.7",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nitesh00747/test-data-mcp.git"
+  }
+}

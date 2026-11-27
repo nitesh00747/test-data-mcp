@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "test-data": {
+      "command": "node",
+      "args": ["--import", "tsx", "src/mcp/server.ts"],
+      "env": { "TEST_DATA_BASE_URL": "http://127.0.0.1:3100" }
+    }
+  }
+}
